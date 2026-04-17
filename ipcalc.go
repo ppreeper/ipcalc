@@ -1,8 +1,12 @@
+// Package ipcalc provides IPv4 CIDR calculation utilities including
+// netmask conversion, network/broadcast address derivation, and
+// host count computation.
 package ipcalc
 
 import (
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"net/netip"
 )
 
@@ -17,111 +21,142 @@ type CIDR struct {
 	BroadcastAddress netip.Addr
 }
 
-func NetmaskStringToBits(mask string) int {
+// NetmaskStringToBits parses an IPv4 netmask string (e.g. "255.255.255.0")
+// and returns the number of set bits in the mask.
+// Returns an error if the string is not a valid IPv4 address.
+func NetmaskStringToBits(mask string) (int, error) {
 	maskAddr, err := netip.ParseAddr(mask)
 	if err != nil {
-		fmt.Println(err)
+		return 0, fmt.Errorf("NetmaskStringToBits: %w", err)
 	}
-	return NetmaskToBits(maskAddr)
+	n, err := NetmaskToBits(maskAddr)
+	if err != nil {
+		return 0, fmt.Errorf("NetmaskStringToBits: %w", err)
+	}
+	return n, nil
 }
 
-func NetmaskToBits(mask netip.Addr) int {
-	maskBytes := mask.As4()
-	var bits int
-	for _, maskByte := range maskBytes {
-		for maskByte > 0 {
-			if maskByte&1 > 0 {
-				bits++
-			}
-			maskByte >>= 1
-		}
+// NetmaskToBits returns the number of set bits in an IPv4 netmask address.
+// Returns an error if the address is not an IPv4 address.
+func NetmaskToBits(mask netip.Addr) (int, error) {
+	if !mask.Unmap().Is4() {
+		return 0, fmt.Errorf("NetmaskToBits: IPv6 not supported")
 	}
-	return bits
+	b := mask.Unmap().As4()
+	return bits.OnesCount8(b[0]) + bits.OnesCount8(b[1]) +
+		bits.OnesCount8(b[2]) + bits.OnesCount8(b[3]), nil
 }
 
+// CIDRNetmask returns the subnet mask for the given IPv4 prefix length as a netip.Addr.
 func CIDRNetmask(maskBits int) netip.Addr {
-	mask := 0xffffffff << (32 - maskBits)
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(bytes, uint32(mask))
-	bmask := [4]byte{bytes[0], bytes[1], bytes[2], bytes[3]}
-	return netip.AddrFrom4(bmask)
+	// Shifting a uint32 by 32 is well-defined in Go and correctly produces 0 for /0.
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], uint32(0xffffffff<<(32-maskBits)))
+	return netip.AddrFrom4(b)
 }
 
+// WildcardMask returns the wildcard (inverse) mask for the given IPv4 prefix length as a netip.Addr.
 func WildcardMask(maskBits int) netip.Addr {
-	mask := 0xffffffff >> maskBits
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(bytes, uint32(mask))
-	bmask := [4]byte{bytes[0], bytes[1], bytes[2], bytes[3]}
-	return netip.AddrFrom4(bmask)
+	// Shifting a uint32 by 32 is well-defined in Go and correctly produces 0xffffffff for /0.
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], uint32(0xffffffff>>maskBits))
+	return netip.AddrFrom4(b)
 }
 
+// MaximumSubnets returns the total number of addresses in a subnet with the given prefix length,
+// including network and broadcast addresses.
 func MaximumSubnets(maskBits int) int {
 	return 1 << (32 - maskBits)
 }
 
+// MaximumAddresses returns the number of usable host addresses in a subnet with the given
+// prefix length. For /31 and /32 all addresses are usable; for shorter prefixes
+// network and broadcast addresses are excluded.
 func MaximumAddresses(maskBits int) int {
 	if maskBits >= 31 {
 		return MaximumSubnets(maskBits)
-	} else {
-		return MaximumSubnets(maskBits) - 2
 	}
+	return MaximumSubnets(maskBits) - 2
 }
 
+// AddrToBinary converts a 4-byte IPv4 address to its big-endian uint32 representation.
 func AddrToBinary(addr [4]byte) uint32 {
 	return binary.BigEndian.Uint32(addr[:])
 }
 
+// BinaryToAddr converts a big-endian uint32 to a netip.Addr IPv4 address.
 func BinaryToAddr(addr uint32) netip.Addr {
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(bytes, uint32(addr))
-	bmask := [4]byte{bytes[0], bytes[1], bytes[2], bytes[3]}
-	return netip.AddrFrom4(bmask)
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], addr)
+	return netip.AddrFrom4(b)
 }
 
-func CIDRAddress(addr string, bits int) CIDR {
-	cidrAddr, _ := netip.ParseAddr(addr)
-	cidrBits := bits
+// buildCIDR constructs a CIDR value from a parsed IPv4 address and prefix length.
+// Preconditions: addr must be an IPv4 address, bits must be in [0, 32].
+func buildCIDR(addr netip.Addr, cidrBits int) CIDR {
 	netMask := CIDRNetmask(cidrBits)
-
-	// cidr calculation
-	cidrAddrBinary := AddrToBinary(cidrAddr.As4())
-	netMaskBinary := AddrToBinary(netMask.As4())
-	cidrNetworkBinary := cidrAddrBinary & netMaskBinary
-	cidrBroadcastBinary := cidrNetworkBinary | ^netMaskBinary
-
+	addrBin := AddrToBinary(addr.As4())
+	maskBin := AddrToBinary(netMask.As4())
+	netBin := addrBin & maskBin
+	bcBin := netBin | ^maskBin
 	return CIDR{
-		Address:          cidrAddr,
+		Address:          addr,
 		Bits:             cidrBits,
 		Netmask:          netMask,
 		WildcardMask:     WildcardMask(cidrBits),
 		MaximumSubnets:   MaximumSubnets(cidrBits),
 		MaximumAddresses: MaximumAddresses(cidrBits),
-		NetworkAddress:   BinaryToAddr(cidrNetworkBinary),
-		BroadcastAddress: BinaryToAddr(cidrBroadcastBinary),
+		NetworkAddress:   BinaryToAddr(netBin),
+		BroadcastAddress: BinaryToAddr(bcBin),
 	}
 }
 
-func CIDRAddressFromString(cidr string) CIDR {
-	pfx, _ := netip.ParsePrefix(cidr)
+// String returns a human-readable summary of the CIDR block.
+func (c CIDR) String() string {
+	return fmt.Sprintf(
+		"Address: %s/%d  Network: %s  Broadcast: %s  Netmask: %s  Wildcard: %s  Hosts: %d",
+		c.Address, c.Bits, c.NetworkAddress, c.BroadcastAddress,
+		c.Netmask, c.WildcardMask, c.MaximumAddresses,
+	)
+}
 
-	cidrAddr := pfx.Addr()
-	cidrBits := pfx.Bits()
-	netMask := CIDRNetmask(cidrBits)
-
-	// cidr calculation
-	cidrAddrBinary := AddrToBinary(cidrAddr.As4())
-	netMaskBinary := AddrToBinary(netMask.As4())
-	cidrNetworkBinary := cidrAddrBinary & netMaskBinary
-	cidrBroadcastBinary := cidrNetworkBinary | ^netMaskBinary
-
-	return CIDR{
-		Address:          cidrAddr,
-		Bits:             cidrBits,
-		Netmask:          netMask,
-		WildcardMask:     WildcardMask(cidrBits),
-		MaximumSubnets:   MaximumSubnets(cidrBits),
-		MaximumAddresses: MaximumAddresses(cidrBits),
-		NetworkAddress:   BinaryToAddr(cidrNetworkBinary),
-		BroadcastAddress: BinaryToAddr(cidrBroadcastBinary),
+// validateIPv4Bits returns an error if addr is not an IPv4 address
+// or if bits is outside the valid prefix length range [0, 32].
+func validateIPv4Bits(addr netip.Addr, bits int) error {
+	if !addr.Unmap().Is4() {
+		return fmt.Errorf("IPv6 not supported")
 	}
+	if bits < 0 || bits > 32 {
+		return fmt.Errorf("prefix length %d out of range [0, 32]", bits)
+	}
+	return nil
+}
+
+// CIDRAddress parses an IPv4 address string and prefix length, returning a populated CIDR.
+// Returns an error if the address is invalid, not IPv4, or bits is outside [0, 32].
+func CIDRAddress(addr string, bits int) (CIDR, error) {
+	cidrAddr, err := netip.ParseAddr(addr)
+	if err != nil {
+		return CIDR{}, fmt.Errorf("CIDRAddress: %w", err)
+	}
+	if err := validateIPv4Bits(cidrAddr, bits); err != nil {
+		return CIDR{}, fmt.Errorf("CIDRAddress: %w", err)
+	}
+	return buildCIDR(cidrAddr, bits), nil
+}
+
+// CIDRAddressFromString parses a CIDR notation string (e.g. "192.168.1.0/24")
+// and returns a populated CIDR.
+// Returns an error if the string is invalid or the address is not IPv4.
+func CIDRAddressFromString(cidr string) (CIDR, error) {
+	pfx, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return CIDR{}, fmt.Errorf("CIDRAddressFromString: %w", err)
+	}
+	addr := pfx.Addr()
+	bits := pfx.Bits()
+	if err := validateIPv4Bits(addr, bits); err != nil {
+		return CIDR{}, fmt.Errorf("CIDRAddressFromString: %w", err)
+	}
+	return buildCIDR(addr, bits), nil
 }

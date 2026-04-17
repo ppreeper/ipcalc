@@ -1,6 +1,7 @@
 package ipcalc_test
 
 import (
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -52,40 +53,82 @@ var NetmaskTable = []struct {
 
 func TestNetmaskStringToBits(t *testing.T) {
 	for _, mt := range NetmaskTable {
-		bits := ipcalc.NetmaskStringToBits(mt.NetmaskString)
-		if bits != mt.NetmaskBits {
-			t.Errorf("expected %d, got %d", mt.NetmaskBits, bits)
-		}
+		t.Run(mt.NetmaskString, func(t *testing.T) {
+			bits, err := ipcalc.NetmaskStringToBits(mt.NetmaskString)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if bits != mt.NetmaskBits {
+				t.Errorf("expected %d, got %d", mt.NetmaskBits, bits)
+			}
+		})
 	}
+}
+
+func TestNetmaskStringToBitsError(t *testing.T) {
+	t.Run("invalid address", func(t *testing.T) {
+		_, err := ipcalc.NetmaskStringToBits("not-an-ip")
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+	t.Run("IPv6 rejected", func(t *testing.T) {
+		_, err := ipcalc.NetmaskStringToBits("::1")
+		if err == nil {
+			t.Error("expected error for IPv6, got nil")
+		}
+	})
 }
 
 func TestNetmaskToBits(t *testing.T) {
 	for _, mt := range NetmaskTable {
-		bits := ipcalc.NetmaskToBits(mt.NetmaskIP)
-		if bits != mt.NetmaskBits {
-			t.Errorf("expected %d, got %d", mt.NetmaskBits, bits)
-		}
+		t.Run(mt.NetmaskString, func(t *testing.T) {
+			bits, err := ipcalc.NetmaskToBits(mt.NetmaskIP)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if bits != mt.NetmaskBits {
+				t.Errorf("expected %d, got %d", mt.NetmaskBits, bits)
+			}
+		})
 	}
+}
+
+func TestNetmaskToBitsError(t *testing.T) {
+	t.Run("IPv6 rejected", func(t *testing.T) {
+		ipv6, _ := netip.ParseAddr("::1")
+		_, err := ipcalc.NetmaskToBits(ipv6)
+		if err == nil {
+			t.Error("expected error for IPv6, got nil")
+		}
+	})
 }
 
 func TestCIDRNetmask(t *testing.T) {
 	for _, mt := range NetmaskTable {
-		mask := ipcalc.CIDRNetmask(mt.NetmaskBits)
-		if mask != mt.NetmaskIP {
-			t.Errorf("expected %v, got %v", mt.NetmaskIP, mask)
-		}
+		t.Run(mt.NetmaskString, func(t *testing.T) {
+			mask := ipcalc.CIDRNetmask(mt.NetmaskBits)
+			if mask != mt.NetmaskIP {
+				t.Errorf("expected %v, got %v", mt.NetmaskIP, mask)
+			}
+		})
 	}
 }
 
 func TestWildcardMask(t *testing.T) {
 	for _, mt := range NetmaskTable {
-		mask := ipcalc.WildcardMask(mt.NetmaskBits)
-		if mask != mt.WildcardMask {
-			t.Errorf("expected %v, got %v", mt.WildcardMask, mask)
-		}
+		t.Run(mt.NetmaskString, func(t *testing.T) {
+			mask := ipcalc.WildcardMask(mt.NetmaskBits)
+			if mask != mt.WildcardMask {
+				t.Errorf("expected %v, got %v", mt.WildcardMask, mask)
+			}
+		})
 	}
 }
 
+// SubnetCountTable covers prefix lengths /1 through /32.
+// /0 is intentionally omitted: MaximumSubnets(0) = 1<<32 = 4294967296,
+// which overflows int on 32-bit platforms.
 var SubnetCountTable = []struct {
 	NetmaskBits int
 	SubnetCount int
@@ -127,59 +170,171 @@ var SubnetCountTable = []struct {
 
 func TestMaximumSubnets(t *testing.T) {
 	for _, mt := range SubnetCountTable {
-		nets := ipcalc.MaximumSubnets(mt.NetmaskBits)
-		if nets != mt.SubnetCount {
-			t.Errorf("expected %v, got %v", mt.SubnetCount, nets)
-		}
+		t.Run(fmt.Sprintf("/%d", mt.NetmaskBits), func(t *testing.T) {
+			nets := ipcalc.MaximumSubnets(mt.NetmaskBits)
+			if nets != mt.SubnetCount {
+				t.Errorf("expected %v, got %v", mt.SubnetCount, nets)
+			}
+		})
 	}
 }
 
 func TestMaximumAddresses(t *testing.T) {
 	for _, mt := range SubnetCountTable {
-		nets := ipcalc.MaximumAddresses(mt.NetmaskBits)
-		if nets != mt.AddrCount {
-			t.Errorf("expected %v, got %v", mt.AddrCount, nets)
-		}
+		t.Run(fmt.Sprintf("/%d", mt.NetmaskBits), func(t *testing.T) {
+			nets := ipcalc.MaximumAddresses(mt.NetmaskBits)
+			if nets != mt.AddrCount {
+				t.Errorf("expected %v, got %v", mt.AddrCount, nets)
+			}
+		})
 	}
 }
 
 func TestAddrToBinary(t *testing.T) {
-	ipcalc.AddrToBinary(IPAddressByte)
+	got := ipcalc.AddrToBinary(IPAddressByte)
+	if got != IPAddressUint32 {
+		t.Errorf("expected %d, got %d", IPAddressUint32, got)
+	}
 }
 
 func TestBinaryToAddr(t *testing.T) {
-	ipcalc.BinaryToAddr(IPAddressUint32)
+	got := ipcalc.BinaryToAddr(IPAddressUint32)
+	want := netip.AddrFrom4(IPAddressByte)
+	if got != want {
+		t.Errorf("expected %v, got %v", want, got)
+	}
+}
+
+func TestCIDRString(t *testing.T) {
+	tests := []struct {
+		cidr string
+		want string
+	}{
+		{
+			"10.16.1.1/24",
+			"Address: 10.16.1.1/24  Network: 10.16.1.0  Broadcast: 10.16.1.255  Netmask: 255.255.255.0  Wildcard: 0.0.0.255  Hosts: 254",
+		},
+		{
+			"10.16.1.1/31",
+			"Address: 10.16.1.1/31  Network: 10.16.1.0  Broadcast: 10.16.1.1  Netmask: 255.255.255.254  Wildcard: 0.0.0.1  Hosts: 2",
+		},
+		{
+			"10.16.1.1/32",
+			"Address: 10.16.1.1/32  Network: 10.16.1.1  Broadcast: 10.16.1.1  Netmask: 255.255.255.255  Wildcard: 0.0.0.0  Hosts: 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cidr, func(t *testing.T) {
+			cidr, err := ipcalc.CIDRAddressFromString(tt.cidr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := cidr.String(); got != tt.want {
+				t.Errorf("expected %q, got %q", tt.want, got)
+			}
+		})
+	}
 }
 
 func TestCIDRAddress(t *testing.T) {
-	ipcalc.CIDRAddress(IPAddress, NetmaskBits)
+	cidr, err := ipcalc.CIDRAddress(IPAddress, NetmaskBits)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cidr.Bits != NetmaskBits {
+		t.Errorf("expected bits %d, got %d", NetmaskBits, cidr.Bits)
+	}
+	if cidr.NetworkAddress != netip.AddrFrom4([4]byte{10, 16, 1, 0}) {
+		t.Errorf("unexpected network address: %v", cidr.NetworkAddress)
+	}
+	if cidr.BroadcastAddress != netip.AddrFrom4([4]byte{10, 16, 1, 255}) {
+		t.Errorf("unexpected broadcast address: %v", cidr.BroadcastAddress)
+	}
+}
+
+func TestCIDRAddressErrors(t *testing.T) {
+	t.Run("invalid address", func(t *testing.T) {
+		_, err := ipcalc.CIDRAddress("not-an-ip", 24)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+	t.Run("IPv6 rejected", func(t *testing.T) {
+		_, err := ipcalc.CIDRAddress("::1", 24)
+		if err == nil {
+			t.Error("expected error for IPv6, got nil")
+		}
+	})
+	t.Run("bits too high", func(t *testing.T) {
+		_, err := ipcalc.CIDRAddress("10.0.0.1", 33)
+		if err == nil {
+			t.Error("expected error for bits=33, got nil")
+		}
+	})
+	t.Run("bits negative", func(t *testing.T) {
+		_, err := ipcalc.CIDRAddress("10.0.0.1", -1)
+		if err == nil {
+			t.Error("expected error for bits=-1, got nil")
+		}
+	})
 }
 
 func TestCIDRAddressFromString(t *testing.T) {
-	ipcalc.CIDRAddressFromString(CIDRAddress)
+	cidr, err := ipcalc.CIDRAddressFromString(CIDRAddressStr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cidr.Bits != NetmaskBits {
+		t.Errorf("expected bits %d, got %d", NetmaskBits, cidr.Bits)
+	}
+	if cidr.NetworkAddress != netip.AddrFrom4([4]byte{10, 16, 1, 0}) {
+		t.Errorf("unexpected network address: %v", cidr.NetworkAddress)
+	}
+	if cidr.BroadcastAddress != netip.AddrFrom4([4]byte{10, 16, 1, 255}) {
+		t.Errorf("unexpected broadcast address: %v", cidr.BroadcastAddress)
+	}
+}
+
+func TestCIDRAddressFromStringErrors(t *testing.T) {
+	t.Run("invalid CIDR", func(t *testing.T) {
+		_, err := ipcalc.CIDRAddressFromString("not-a-cidr")
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+	t.Run("IPv6 rejected", func(t *testing.T) {
+		_, err := ipcalc.CIDRAddressFromString("::1/64")
+		if err == nil {
+			t.Error("expected error for IPv6, got nil")
+		}
+	})
 }
 
 // Benchmarks
 
 var (
-	IPAddress           = "10.16.1.1"
-	IPAddressUint32     = uint32(168427521)
-	IPAddressByte       = [4]byte{10, 16, 1, 1}
-	NetmaskString       = "255.255.255.0"
-	NetmaskIP, _        = netip.ParseAddr("255.255.255.0")
-	NetmaskBits     int = 24
-	CIDRAddress         = "10.16.1.1/24"
+	IPAddress       = "10.16.1.1"
+	IPAddressUint32 = uint32(168820993)
+	IPAddressByte   = [4]byte{10, 16, 1, 1}
+	NetmaskString   = "255.255.255.0"
+	NetmaskIP, _    = netip.ParseAddr("255.255.255.0")
+	NetmaskBits     = 24
+	CIDRAddressStr  = "10.16.1.1/24"
 )
 
 func BenchmarkNetmaskStringToBits(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ipcalc.NetmaskStringToBits(NetmaskString)
+		if _, err := ipcalc.NetmaskStringToBits(NetmaskString); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkNetmaskToBits(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ipcalc.NetmaskToBits(NetmaskIP)
+		if _, err := ipcalc.NetmaskToBits(NetmaskIP); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -195,21 +350,18 @@ func BenchmarkWildcardMask(b *testing.B) {
 	}
 }
 
-// MaximumSubnets
 func BenchmarkMaximumSubnets(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ipcalc.MaximumSubnets(NetmaskBits)
 	}
 }
 
-// MaximumAddresses
 func BenchmarkMaximumAddresses(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ipcalc.MaximumAddresses(NetmaskBits)
 	}
 }
 
-// AddrToBinary
 func BenchmarkAddrToBinary(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ipcalc.AddrToBinary(IPAddressByte)
@@ -224,12 +376,16 @@ func BenchmarkBinaryToAddr(b *testing.B) {
 
 func BenchmarkCIDRAddress(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ipcalc.CIDRAddress(IPAddress, NetmaskBits)
+		if _, err := ipcalc.CIDRAddress(IPAddress, NetmaskBits); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkCIDRAddressFromString(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ipcalc.CIDRAddressFromString(CIDRAddress)
+		if _, err := ipcalc.CIDRAddressFromString(CIDRAddressStr); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
