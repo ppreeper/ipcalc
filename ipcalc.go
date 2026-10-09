@@ -23,7 +23,8 @@ type CIDR struct {
 
 // NetmaskStringToBits parses an IPv4 netmask string (e.g. "255.255.255.0")
 // and returns the number of set bits in the mask.
-// Returns an error if the string is not a valid IPv4 address.
+// Returns an error if the string is not a valid IPv4 address or the mask is
+// not contiguous.
 func NetmaskStringToBits(mask string) (int, error) {
 	maskAddr, err := netip.ParseAddr(mask)
 	if err != nil {
@@ -37,42 +38,67 @@ func NetmaskStringToBits(mask string) (int, error) {
 }
 
 // NetmaskToBits returns the number of set bits in an IPv4 netmask address.
-// Returns an error if the address is not an IPv4 address.
+// Returns an error if the address is not an IPv4 address or if the mask is
+// not a contiguous sequence of set bits (for example 255.0.255.0 is rejected).
 func NetmaskToBits(mask netip.Addr) (int, error) {
 	if !mask.Unmap().Is4() {
-		return 0, fmt.Errorf("NetmaskToBits: IPv6 not supported")
+		return 0, fmt.Errorf("IPv6 not supported")
 	}
 	b := mask.Unmap().As4()
-	return bits.OnesCount8(b[0]) + bits.OnesCount8(b[1]) +
-		bits.OnesCount8(b[2]) + bits.OnesCount8(b[3]), nil
+	n := bits.OnesCount8(b[0]) + bits.OnesCount8(b[1]) +
+		bits.OnesCount8(b[2]) + bits.OnesCount8(b[3])
+	if AddrToBinary(b) != AddrToBinary(CIDRNetmask(n).As4()) {
+		return 0, fmt.Errorf("%s is not a contiguous netmask", mask)
+	}
+	return n, nil
 }
 
-// CIDRNetmask returns the subnet mask for the given IPv4 prefix length as a netip.Addr.
+// clampBits constrains a prefix length to the valid IPv4 range [0, 32].
+func clampBits(maskBits int) int {
+	if maskBits < 0 {
+		return 0
+	}
+	if maskBits > 32 {
+		return 32
+	}
+	return maskBits
+}
+
+// CIDRNetmask returns the subnet mask for the given IPv4 prefix length as a
+// netip.Addr. Prefix lengths outside [0, 32] are clamped to that range.
 func CIDRNetmask(maskBits int) netip.Addr {
+	maskBits = clampBits(maskBits)
 	// Shifting a uint32 by 32 is well-defined in Go and correctly produces 0 for /0.
 	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], uint32(0xffffffff<<(32-maskBits)))
+	binary.BigEndian.PutUint32(b[:], ^uint32(0)<<(32-uint(maskBits)))
 	return netip.AddrFrom4(b)
 }
 
-// WildcardMask returns the wildcard (inverse) mask for the given IPv4 prefix length as a netip.Addr.
+// WildcardMask returns the wildcard (inverse) mask for the given IPv4 prefix
+// length as a netip.Addr. Prefix lengths outside [0, 32] are clamped to that range.
 func WildcardMask(maskBits int) netip.Addr {
+	maskBits = clampBits(maskBits)
 	// Shifting a uint32 by 32 is well-defined in Go and correctly produces 0xffffffff for /0.
 	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], uint32(0xffffffff>>maskBits))
+	binary.BigEndian.PutUint32(b[:], ^uint32(0)>>uint(maskBits))
 	return netip.AddrFrom4(b)
 }
 
-// MaximumSubnets returns the total number of addresses in a subnet with the given prefix length,
-// including network and broadcast addresses.
+// MaximumSubnets returns the total number of addresses in a subnet with the
+// given prefix length, including network and broadcast addresses. Prefix
+// lengths outside [0, 32] are clamped to that range. Note that /0 yields 2^32,
+// which does not fit in an int on 32-bit platforms.
 func MaximumSubnets(maskBits int) int {
+	maskBits = clampBits(maskBits)
 	return 1 << (32 - maskBits)
 }
 
-// MaximumAddresses returns the number of usable host addresses in a subnet with the given
-// prefix length. For /31 and /32 all addresses are usable; for shorter prefixes
-// network and broadcast addresses are excluded.
+// MaximumAddresses returns the number of usable host addresses in a subnet
+// with the given prefix length. For /31 and /32 all addresses are usable; for
+// shorter prefixes network and broadcast addresses are excluded. Prefix
+// lengths outside [0, 32] are clamped to that range.
 func MaximumAddresses(maskBits int) int {
+	maskBits = clampBits(maskBits)
 	if maskBits >= 31 {
 		return MaximumSubnets(maskBits)
 	}
