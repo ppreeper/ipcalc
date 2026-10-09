@@ -78,6 +78,12 @@ func TestNetmaskStringToBitsError(t *testing.T) {
 			t.Error("expected error for IPv6, got nil")
 		}
 	})
+	t.Run("non-contiguous netmask rejected", func(t *testing.T) {
+		_, err := ipcalc.NetmaskStringToBits("255.0.255.0")
+		if err == nil {
+			t.Error("expected error for non-contiguous netmask, got nil")
+		}
+	})
 }
 
 func TestNetmaskToBits(t *testing.T) {
@@ -96,10 +102,19 @@ func TestNetmaskToBits(t *testing.T) {
 
 func TestNetmaskToBitsError(t *testing.T) {
 	t.Run("IPv6 rejected", func(t *testing.T) {
-		ipv6, _ := netip.ParseAddr("::1")
-		_, err := ipcalc.NetmaskToBits(ipv6)
+		_, err := ipcalc.NetmaskToBits(netip.MustParseAddr("::1"))
 		if err == nil {
 			t.Error("expected error for IPv6, got nil")
+		}
+	})
+	t.Run("non-contiguous mask rejected", func(t *testing.T) {
+		for _, mask := range []string{"255.0.255.0", "255.255.255.1", "0.255.0.0"} {
+			t.Run(mask, func(t *testing.T) {
+				_, err := ipcalc.NetmaskToBits(netip.MustParseAddr(mask))
+				if err == nil {
+					t.Errorf("expected error for non-contiguous mask %s, got nil", mask)
+				}
+			})
 		}
 	})
 }
@@ -185,6 +200,46 @@ func TestMaximumAddresses(t *testing.T) {
 			nets := ipcalc.MaximumAddresses(mt.NetmaskBits)
 			if nets != mt.AddrCount {
 				t.Errorf("expected %v, got %v", mt.AddrCount, nets)
+			}
+		})
+	}
+}
+
+// TestBitRangeClamping verifies that out-of-range prefix lengths are clamped to
+// [0, 32] instead of panicking or returning undefined results.
+func TestBitRangeClamping(t *testing.T) {
+	addrTests := []struct {
+		name string
+		got  netip.Addr
+		want netip.Addr
+	}{
+		{"CIDRNetmask(-1)", ipcalc.CIDRNetmask(-1), ipcalc.CIDRNetmask(0)},
+		{"CIDRNetmask(33)", ipcalc.CIDRNetmask(33), ipcalc.CIDRNetmask(32)},
+		{"WildcardMask(-1)", ipcalc.WildcardMask(-1), ipcalc.WildcardMask(0)},
+		{"WildcardMask(33)", ipcalc.WildcardMask(33), ipcalc.WildcardMask(32)},
+	}
+	for _, tt := range addrTests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("expected %v, got %v", tt.want, tt.got)
+			}
+		})
+	}
+
+	countTests := []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"MaximumSubnets(-1)", ipcalc.MaximumSubnets(-1), ipcalc.MaximumSubnets(0)},
+		{"MaximumSubnets(33)", ipcalc.MaximumSubnets(33), ipcalc.MaximumSubnets(32)},
+		{"MaximumAddresses(-1)", ipcalc.MaximumAddresses(-1), ipcalc.MaximumAddresses(0)},
+		{"MaximumAddresses(33)", ipcalc.MaximumAddresses(33), ipcalc.MaximumAddresses(32)},
+	}
+	for _, tt := range countTests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("expected %v, got %v", tt.want, tt.got)
 			}
 		})
 	}
@@ -277,6 +332,21 @@ func TestCIDRAddressErrors(t *testing.T) {
 			t.Error("expected error for bits=-1, got nil")
 		}
 	})
+}
+
+// TestCIDRAddressIPv4Mapped documents that IPv4-mapped IPv6 input is accepted
+// and that the derived network address is a plain IPv4 address.
+func TestCIDRAddressIPv4Mapped(t *testing.T) {
+	cidr, err := ipcalc.CIDRAddress("::ffff:10.0.0.1", 24)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cidr.NetworkAddress != netip.AddrFrom4([4]byte{10, 0, 0, 0}) {
+		t.Errorf("unexpected network address: %v", cidr.NetworkAddress)
+	}
+	if cidr.BroadcastAddress != netip.AddrFrom4([4]byte{10, 0, 0, 255}) {
+		t.Errorf("unexpected broadcast address: %v", cidr.BroadcastAddress)
+	}
 }
 
 func TestCIDRAddressFromString(t *testing.T) {
